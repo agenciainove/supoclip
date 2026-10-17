@@ -1,0 +1,131 @@
+# SupoClip para a VPS da INOVE (Easypanel) — gerado a partir do docker-compose.yml oficial.
+# Diferenças: frontend em modo produção (target runner), sem montar código-fonte, sem portas
+# publicadas (o Easypanel cria os domínios), sem o serviço MCP, transcrição local (Whisper, CPU)
+# e LLM pelo Gemini. Coloque este arquivo na raiz do fork agenciainove/supoclip.
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+        - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
+        - NEXT_PUBLIC_SELF_HOST=true
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
+      - NEXT_PUBLIC_SELF_HOST=true
+      - BACKEND_INTERNAL_URL=http://backend:8000
+      - DISABLE_SIGN_UP=${DISABLE_SIGN_UP:-false}
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
+      - APP_SETTINGS_ENCRYPTION_KEY=${APP_SETTINGS_ENCRYPTION_KEY}
+      - DATABASE_URL=postgresql://supoclip:${POSTGRES_PASSWORD}@postgres:5432/supoclip
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      - BETTER_AUTH_URL=${NEXT_PUBLIC_APP_URL}
+    depends_on:
+      postgres: {condition: service_healthy}
+      backend: {condition: service_healthy}
+    restart: unless-stopped
+
+  backend: &backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        BACKEND_CPU_ONLY: "true"
+    platform: linux/amd64
+    command: [".venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - uploads:/app/uploads
+      - clips:/app/clips
+    environment: &backend_env
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql+asyncpg://supoclip:${POSTGRES_PASSWORD}@postgres:5432/supoclip
+      - TEMP_DIR=/app/uploads
+      - MEDIA_STORAGE=local
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - TRANSCRIPTION_PROVIDER=whisper
+      - TRANSCRIPTION_LANGUAGE=pt
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
+      - LLM=${LLM}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - YOUTUBE_DOWNLOAD_PROVIDER=yt_dlp
+      - YOUTUBE_METADATA_PROVIDER=yt_dlp
+      - MAX_VIDEO_DURATION=${MAX_VIDEO_DURATION:-5400}
+      - MAX_VIDEO_UPLOAD_BYTES=${MAX_VIDEO_UPLOAD_BYTES:-12000000000}
+      - DEFAULT_PROCESSING_MODE=fast
+      - MAX_CLIPS=${MAX_CLIPS:-7}
+      - FAST_MODE_MAX_CLIPS=${MAX_CLIPS:-7}
+      - SPEAKER_FRAMING=true
+      - HOOK_FIRST_TEASER=true
+      - SELF_HOST=true
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
+      - APP_SETTINGS_ENCRYPTION_KEY=${APP_SETTINGS_ENCRYPTION_KEY}
+      - CORS_ORIGINS=${NEXT_PUBLIC_APP_URL}
+      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/db"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  worker:
+    <<: *backend
+    command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", ".venv/bin/arq", "--check", "src.workers.tasks.WorkerSettings"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  redis:
+    image: redis:7-alpine
+    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: supoclip
+      POSTGRES_USER: supoclip
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supoclip -d supoclip"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  uploads:
+  clips:
+  redis_data:
+  postgres_data:
